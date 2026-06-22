@@ -8,106 +8,147 @@ const TELEGRAM_CHAT_ID = '7044831284'
 
 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRole)
 
+// Token SOL asli yang harus di-skip
+const SOLANA_MAIN_TOKENS = [
+  'solana', 'sol', 'wrapped sol', 'wrapped solana',
+  'so11111111111111111111111111111111111111112',
+  'epjfwdd5aufqssqem2qn1xzybapc8g4weggkzwytdt1v'
+]
+
+function isMainToken(name, symbol, address) {
+  const n = (name || '').toLowerCase()
+  const s = (symbol || '').toLowerCase()
+  const a = (address || '').toLowerCase()
+  
+  return SOLANA_MAIN_TOKENS.some(t => 
+    n === t || s === t || n.includes(t) || a === t
+  )
+}
+
 function calculateScore(token) {
-  let score = 50
-  if (token.volume_24h > 50000) score += 20
-  else if (token.volume_24h > 20000) score += 10
-  else if (token.volume_24h > 5000) score += 5
-  if (token.liquidity > 20000) score += 15
-  else if (token.liquidity > 10000) score += 8
-  if (token.market_cap >= 10000 && token.market_cap <= 50000) score += 10
-  if (token.age_hours < 24) score += 10
+  let score = 40
+  if (token.volume_24h > 50000) score += 25
+  else if (token.volume_24h > 20000) score += 15
+  else if (token.volume_24h > 5000) score += 8
+  if (token.liquidity > 30000) score += 20
+  else if (token.liquidity > 10000) score += 12
+  else if (token.liquidity > 3000) score += 5
+  if (token.market_cap >= 5000 && token.market_cap <= 100000) score += 15
+  if (token.age_hours < 6) score += 15
+  else if (token.age_hours < 24) score += 10
   else if (token.age_hours < 72) score += 5
+  if (token.price_change_24h > 0 && token.price_change_24h < 50) score += 5
   return Math.min(score, 100)
 }
 
 function getStatus(score) {
-  if (score >= 90) return 'GEM'
-  if (score >= 75) return 'STRONG_BUY'
-  if (score >= 60) return 'WATCHLIST'
+  if (score >= 85) return 'GEM'
+  if (score >= 70) return 'STRONG_BUY'
+  if (score >= 55) return 'WATCHLIST'
   return 'AVOID'
 }
 
 exports.handler = async () => {
   try {
+    console.log('Fetching DexScreener...')
     const { data } = await axios.get('https://api.dexscreener.com/latest/dex/search?q=SOL')
     
     if (!data.pairs) {
       return { statusCode: 200, body: JSON.stringify({ message: 'No pairs found' }) }
     }
     
+    // Filter: ONLY meme coins
     const pairs = data.pairs.filter(p => {
-      const name = (p.baseToken?.name || '').toLowerCase()
-      const symbol = (p.baseToken?.symbol || '').toLowerCase()
-      const isSolana = name === 'solana' || symbol === 'sol' || name.includes('wrapped sol')
-      return p.chainId === 'solana' && !isSolana
+      const name = p.baseToken?.name || ''
+      const symbol = p.baseToken?.symbol || ''
+      const address = p.baseToken?.address || ''
+      const mcap = p.fdv || 0
+      const liq = p.liquidity?.usd || 0
+      const vol = p.volume?.h24 || 0
+      const age = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 3600000 : 999
+      
+      // Skip token SOL utama
+      if (isMainToken(name, symbol, address)) return false
+      
+      // Hanya Solana
+      if (p.chainId !== 'solana') return false
+      
+      // Filter MCAP, liquidity, volume, age
+      return (
+        mcap >= 3000 && mcap <= 500000 &&
+        liq >= 1000 &&
+        vol >= 500 &&
+        age <= 168 // max 7 hari
+      )
     })
     
+    console.log(`Meme coins found: ${pairs.length}`)
+    
     let scanned = 0
+    let gems = []
     
-    for (const pair of pairs.slice(0, 30)) {
-      const ageHours = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3600000 : 0
-      const holders = Math.floor(Math.random() * 300) + 30
-      
-      const tokenData = {
-        address: pair.baseToken.address,
-        symbol: pair.baseToken.symbol || 'UNKNOWN',
-        name: pair.baseToken.name || 'Unknown',
-        image_url: pair.info?.imageUrl || '',
-        market_cap: pair.fdv || 0,
-        liquidity: pair.liquidity?.usd || 0,
-        volume_24h: pair.volume?.h24 || 0,
-        volume_1h: pair.volume?.h1 || 0,
-        price: parseFloat(pair.priceUsd) || 0,
-        price_change_24h: pair.priceChange?.h24 || 0,
-        total_holders: holders,
-        holder_growth_24h: Math.floor(Math.random() * 30),
-        age_hours: ageHours,
-        dex_url: `https://dexscreener.com/solana/${pair.pairAddress}`,
-        last_scan: new Date().toISOString(),
-      }
-      
-      const aiScore = calculateScore(tokenData)
-      
-      const { data: saved } = await supabaseAdmin
-        .from('tokens')
-        .upsert({
-          ...tokenData,
-          ai_score: aiScore,
-          status: getStatus(aiScore),
-          accumulation_status: aiScore >= 70 ? 'Strong' : aiScore >= 50 ? 'Medium' : 'Weak',
-        }, { onConflict: 'address' })
-        .select()
-        .single()
-      
-      if (saved) {
-        await supabaseAdmin.from('volume_history').insert({
-          token_id: saved.id,
-          volume: tokenData.volume_24h,
-          buys: Math.floor(Math.random() * 50) + 20,
-          sells: Math.floor(Math.random() * 30) + 10,
-        })
+    for (const pair of pairs.slice(0, 25)) {
+      try {
+        const ageHours = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3600000 : 0
+        const holders = Math.floor(Math.random() * 200) + 20
         
-        await supabaseAdmin.from('holder_history').insert({
-          token_id: saved.id,
+        const tokenData = {
+          address: pair.baseToken.address,
+          symbol: pair.baseToken.symbol || 'UNKNOWN',
+          name: pair.baseToken.name || 'Unknown',
+          image_url: pair.info?.imageUrl || '',
+          market_cap: pair.fdv || 0,
+          liquidity: pair.liquidity?.usd || 0,
+          volume_24h: pair.volume?.h24 || 0,
+          volume_1h: pair.volume?.h1 || 0,
+          price: parseFloat(pair.priceUsd) || 0,
+          price_change_24h: pair.priceChange?.h24 || 0,
           total_holders: holders,
-        })
+          holder_growth_24h: Math.floor(Math.random() * 25),
+          age_hours: ageHours,
+          dex_url: `https://dexscreener.com/solana/${pair.pairAddress}`,
+          last_scan: new Date().toISOString(),
+        }
         
+        const aiScore = calculateScore(tokenData)
+        const status = getStatus(aiScore)
+        
+        await supabaseAdmin
+          .from('tokens')
+          .upsert({
+            ...tokenData,
+            ai_score: aiScore,
+            status: status,
+            accumulation_status: aiScore >= 70 ? 'Strong' : aiScore >= 50 ? 'Medium' : 'Weak',
+          }, { onConflict: 'address' })
+        
+        if (status === 'GEM') gems.push(tokenData)
         scanned++
+        
+      } catch(err) {
+        console.error(err.message)
       }
     }
     
-    const { data: gems } = await supabaseAdmin.from('tokens').select('*').eq('status', 'GEM').limit(3)
-    if (gems?.length) {
-      for (const g of gems) {
-        await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-          chat_id: TELEGRAM_CHAT_ID,
-          text: `💎 GEM: ${g.symbol}\nMCAP: $${(g.market_cap||0).toLocaleString()}\nScore: ${g.ai_score}\n${g.dex_url}`
-        })
+    // Kirim sinyal GEM ke Telegram
+    if (gems.length > 0) {
+      for (const g of gems.slice(0, 5)) {
+        try {
+          await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            chat_id: TELEGRAM_CHAT_ID,
+            text: `💎 GEM FOUND!\n\n${g.symbol}\nMCAP: $${(g.market_cap||0).toLocaleString()}\nVol: $${(g.volume_24h||0).toLocaleString()}\nAge: ${Math.floor(g.age_hours)}h\n\n${g.dex_url}`
+          })
+        } catch(err) {}
       }
     }
     
-    return { statusCode: 200, body: JSON.stringify({ message: `Scanned ${scanned} tokens!` }) }
+    return { 
+      statusCode: 200, 
+      body: JSON.stringify({ 
+        message: `✅ Scanned ${scanned} meme coins! ${gems.length} GEMs found.`,
+        scanned, gems: gems.length 
+      }) 
+    }
     
   } catch (error) {
     return { statusCode: 500, body: JSON.stringify({ error: error.message }) }
