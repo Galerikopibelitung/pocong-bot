@@ -38,24 +38,12 @@ exports.handler = async () => {
       return { statusCode: 200, body: JSON.stringify({ message: 'No pairs found' }) }
     }
     
-    // Filter LEBIH LONGGAR
+    // AMBIL SEMUA TOKEN SOLANA
     const pairs = data.pairs.filter(p => {
-      const mcap = p.fdv || 0
-      const liq = p.liquidity?.usd || 0
-      const vol = p.volume?.h24 || 0
-      const age = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 3600000 : 0
-      
-      return (
-        p.chainId === 'solana' &&
-        mcap >= 3000 &&           // Min $3K (lebih rendah)
-        mcap <= 500000 &&         // Max $500K (lebih tinggi)
-        liq >= 1000 &&            // Min $1K liquidity
-        vol >= 1000 &&            // Min $1K volume
-        age <= 168                // Max 7 hari
-      )
+      return p.chainId === 'solana'
     })
     
-    console.log(`Filtered ${pairs.length} tokens`)
+    console.log(`Found ${pairs.length} Solana tokens`)
     
     let scanned = 0
     
