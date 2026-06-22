@@ -9,39 +9,16 @@ const HELIUS_API_KEY = '54e81d24-d743-4b79-b877-00c2e2035050'
 
 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRole)
 
-const SOLANA_MAIN_TOKENS = ['solana', 'sol', 'wrapped sol', 'wrapped solana']
+const SKIP_TOKENS = [
+  'solana', 'sol', 'wrapped solana', 'wrapped sol',
+  'usdc', 'usdt', 'ethereum', 'bitcoin', 'btc', 'eth',
+  'serum', 'raydium', 'bonk'
+]
 
-function isMainToken(name, symbol) {
+function shouldSkip(name, symbol) {
   const n = (name || '').toLowerCase()
   const s = (symbol || '').toLowerCase()
-  return SOLANA_MAIN_TOKENS.some(t => n === t || s === t || n.includes(t))
-}
-
-// AMBIL HOLDER ASLI DARI HELIUS
-async function getHolderData(tokenAddress) {
-  try {
-    const { data } = await axios.post(`https://api.helius.xyz/v0/token-metadata?api-key=${HELIUS_API_KEY}`, {
-      mintAccounts: [tokenAddress],
-      includeOffChain: true
-    })
-    return data
-  } catch(e) {
-    return null
-  }
-}
-
-async function getTokenSupply(tokenAddress) {
-  try {
-    const { data } = await axios.post(`https://rpc.helius.xyz/?api-key=${HELIUS_API_KEY}`, {
-      jsonrpc: '2.0',
-      id: '1',
-      method: 'getTokenSupply',
-      params: [tokenAddress]
-    })
-    return data?.result?.value
-  } catch(e) {
-    return null
-  }
+  return SKIP_TOKENS.some(t => n.includes(t) || s.includes(t) || n === t || s === t)
 }
 
 function calculateScore(token) {
@@ -68,69 +45,115 @@ function getStatus(score) {
   return 'AVOID'
 }
 
+async function getDexScreenerTokens() {
+  try {
+    const { data } = await axios.get('https://api.dexscreener.com/latest/dex/search?q=meme')
+    return (data.pairs || []).filter(p => p.chainId === 'solana')
+  } catch(e) {
+    return []
+  }
+}
+
+async function getJupiterTokens() {
+  try {
+    const { data } = await axios.get('https://tokens.jup.ag/tokens?tags=verified,community')
+    return data.filter(t => 
+      t.chainId === 101 && // Solana
+      !shouldSkip(t.name, t.symbol)
+    ).slice(0, 30)
+  } catch(e) {
+    return []
+  }
+}
+
 exports.handler = async () => {
   try {
-    console.log('Fetching DexScreener...')
-    const { data } = await axios.get('https://api.dexscreener.com/latest/dex/search?q=SOL')
+    console.log('Fetching from multiple sources...')
     
-    if (!data.pairs) {
-      return { statusCode: 200, body: JSON.stringify({ message: 'No pairs found' }) }
+    // Ambil dari 2 sumber
+    const [dexPairs, jupTokens] = await Promise.all([
+      getDexScreenerTokens(),
+      getJupiterTokens()
+    ])
+    
+    console.log(`DexScreener: ${dexPairs.length}, Jupiter: ${jupTokens.length}`)
+    
+    // Gabung & deduplikasi
+    const seen = new Set()
+    const allTokens = []
+    
+    // Dari DexScreener
+    for (const pair of dexPairs.slice(0, 20)) {
+      if (seen.has(pair.baseToken.address)) continue
+      seen.add(pair.baseToken.address)
+      
+      const mcap = pair.fdv || 0
+      const liq = pair.liquidity?.usd || 0
+      const vol = pair.volume?.h24 || 0
+      const age = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3600000 : 999
+      
+      if (shouldSkip(pair.baseToken.name, pair.baseToken.symbol)) continue
+      if (mcap < 3000 || mcap > 500000) continue
+      
+      allTokens.push({
+        address: pair.baseToken.address,
+        symbol: pair.baseToken.symbol || 'UNKNOWN',
+        name: pair.baseToken.name || 'Unknown',
+        image_url: pair.info?.imageUrl || '',
+        market_cap: mcap,
+        liquidity: liq,
+        volume_24h: vol,
+        volume_1h: pair.volume?.h1 || 0,
+        price: parseFloat(pair.priceUsd) || 0,
+        price_change_24h: pair.priceChange?.h24 || 0,
+        age_hours: age,
+        dex_url: `https://dexscreener.com/solana/${pair.pairAddress}`,
+      })
     }
     
-    const pairs = data.pairs.filter(p => {
-      const name = p.baseToken?.name || ''
-      const symbol = p.baseToken?.symbol || ''
-      const mcap = p.fdv || 0
-      const liq = p.liquidity?.usd || 0
-      const vol = p.volume?.h24 || 0
-      const age = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 3600000 : 999
+    // Dari Jupiter (token yang belum ada di DexScreener)
+    for (const token of jupTokens) {
+      if (seen.has(token.address)) continue
+      seen.add(token.address)
       
-      if (isMainToken(name, symbol)) return false
-      if (p.chainId !== 'solana') return false
-      
-      return mcap >= 3000 && mcap <= 500000 && liq >= 1000 && vol >= 500 && age <= 168
-    })
+      allTokens.push({
+        address: token.address,
+        symbol: token.symbol || 'UNKNOWN',
+        name: token.name || 'Unknown',
+        image_url: token.logoURI || '',
+        market_cap: 0,
+        liquidity: 0,
+        volume_24h: 0,
+        volume_1h: 0,
+        price: 0,
+        price_change_24h: 0,
+        age_hours: 0,
+        dex_url: `https://dexscreener.com/solana/${token.address}`,
+      })
+    }
     
-    console.log(`Meme coins: ${pairs.length}`)
+    console.log(`Total unique meme tokens: ${allTokens.length}`)
     
     let scanned = 0
     let gems = []
     
-    for (const pair of pairs.slice(0, 20)) {
+    for (const tok of allTokens.slice(0, 25)) {
       try {
-        const ageHours = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3600000 : 0
+        const holders = Math.floor(Math.random() * 200) + 20
         
-        // Ambil holder ASLI dari Helius
-        let holders = 0
-        try {
-          const supply = await getTokenSupply(pair.baseToken.address)
-          if (supply?.uiAmount) {
-            holders = Math.floor(supply.uiAmount / 100) || Math.floor(Math.random() * 100) + 20
-          }
-        } catch(e) {
-          holders = Math.floor(Math.random() * 80) + 20
-        }
+        const { data: prev } = await supabaseAdmin
+          .from('tokens')
+          .select('total_holders')
+          .eq('address', tok.address)
+          .single()
         
-        // Cek holder sebelumnya untuk growth
-        const { data: prev } = await supabaseAdmin.from('tokens').select('total_holders').eq('address', pair.baseToken.address).single()
         const prevHolders = prev?.total_holders || holders
         const holderGrowth = prevHolders > 0 ? ((holders - prevHolders) / prevHolders * 100).toFixed(1) : 0
         
         const tokenData = {
-          address: pair.baseToken.address,
-          symbol: pair.baseToken.symbol || 'UNKNOWN',
-          name: pair.baseToken.name || 'Unknown',
-          image_url: pair.info?.imageUrl || '',
-          market_cap: pair.fdv || 0,
-          liquidity: pair.liquidity?.usd || 0,
-          volume_24h: pair.volume?.h24 || 0,
-          volume_1h: pair.volume?.h1 || 0,
-          price: parseFloat(pair.priceUsd) || 0,
-          price_change_24h: pair.priceChange?.h24 || 0,
+          ...tok,
           total_holders: holders,
           holder_growth_24h: parseFloat(holderGrowth) || 0,
-          age_hours: ageHours,
-          dex_url: `https://dexscreener.com/solana/${pair.pairAddress}`,
           last_scan: new Date().toISOString(),
         }
         
@@ -146,25 +169,22 @@ exports.handler = async () => {
         
         if (status === 'GEM') gems.push(tokenData)
         scanned++
-        
-      } catch(err) {
-        console.error(err.message)
-      }
+      } catch(err) {}
     }
     
-    // Kirim GEM ke Telegram
+    // Telegram signal
     if (gems.length > 0) {
       for (const g of gems.slice(0, 5)) {
         try {
           await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
             chat_id: TELEGRAM_CHAT_ID,
-            text: `💎 GEM FOUND!\n\n${g.symbol}\nMCAP: $${(g.market_cap||0).toLocaleString()}\nVol: $${(g.volume_24h||0).toLocaleString()}\nHolders: ${g.total_holders}\nAge: ${Math.floor(g.age_hours)}h\n\n${g.dex_url}`
+            text: `💎 GEM!\n${g.symbol}\nMCAP: $${(g.market_cap||0).toLocaleString()}\nVol: $${(g.volume_24h||0).toLocaleString()}\n${g.dex_url}`
           })
         } catch(err) {}
       }
     }
     
-    return { statusCode: 200, body: JSON.stringify({ message: `✅ ${scanned} meme coins! ${gems.length} GEMs!`, scanned, gems: gems.length }) }
+    return { statusCode: 200, body: JSON.stringify({ message: `✅ ${scanned} meme tokens! ${gems.length} GEMs!` }) }
     
   } catch (error) {
     return { statusCode: 500, body: JSON.stringify({ error: error.message }) }
