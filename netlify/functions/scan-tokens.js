@@ -30,20 +30,18 @@ function getStatus(score) {
 
 exports.handler = async () => {
   try {
-    console.log('Fetching from DexScreener...')
-    
     const { data } = await axios.get('https://api.dexscreener.com/latest/dex/search?q=SOL')
     
     if (!data.pairs) {
       return { statusCode: 200, body: JSON.stringify({ message: 'No pairs found' }) }
     }
     
-    // AMBIL SEMUA TOKEN SOLANA
     const pairs = data.pairs.filter(p => {
-      return p.chainId === 'solana'
+      const name = (p.baseToken?.name || '').toLowerCase()
+      const symbol = (p.baseToken?.symbol || '').toLowerCase()
+      const isSolana = name === 'solana' || symbol === 'sol' || name.includes('wrapped sol')
+      return p.chainId === 'solana' && !isSolana
     })
-    
-    console.log(`Found ${pairs.length} Solana tokens`)
     
     let scanned = 0
     
@@ -55,6 +53,7 @@ exports.handler = async () => {
         address: pair.baseToken.address,
         symbol: pair.baseToken.symbol || 'UNKNOWN',
         name: pair.baseToken.name || 'Unknown',
+        image_url: pair.info?.imageUrl || '',
         market_cap: pair.fdv || 0,
         liquidity: pair.liquidity?.usd || 0,
         volume_24h: pair.volume?.h24 || 0,
@@ -98,7 +97,6 @@ exports.handler = async () => {
       }
     }
     
-    // Kirim sinyal kalau ada GEM
     const { data: gems } = await supabaseAdmin.from('tokens').select('*').eq('status', 'GEM').limit(3)
     if (gems?.length) {
       for (const g of gems) {
